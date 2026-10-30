@@ -1,0 +1,213 @@
+<meta charset="utf-8" />
+<style>
+  html,
+  body {
+    height: 100%;
+    margin: 0;
+  }
+  assist-workspace-card {
+    display: block;
+    height: 100%;
+    --primary-color: #027c9b;
+    --primary-text-color: #202124;
+    --secondary-text-color: #5f6368;
+    --text-primary-color: #ffffff;
+    --card-background-color: #ffffff;
+    --secondary-background-color: #f1f3f4;
+    --divider-color: #d0d5dd;
+  }
+</style>
+<script type="module" src="/src/assist-workspace-card.ts"></script>
+<assist-workspace-card></assist-workspace-card>
+<script>
+  const longMessages = Array.from({ length: 36 }, (_, index) => [
+    {
+      id: `long-user-${index}`,
+      role: "user",
+      visible_content: `Question ${index}`,
+    },
+    {
+      id: `long-assistant-${index}`,
+      role: "assistant",
+      visible_content:
+        `Answer ${index}\n\n` +
+        "This is deterministic browser-test content that makes the real timeline overflow without replacing DOM scroll properties.",
+    },
+  ]).flat();
+  const useLongConversation = new URLSearchParams(location.search).has("long");
+  let conversations = [
+    {
+      id: "a",
+      agent_id: "test",
+      title: "Alpha Project",
+      updated_at: "2026-09-05T12:00:00Z",
+      messages: useLongConversation
+        ? longMessages
+        : [{ id: "u", role: "user", visible_content: "Hi" }],
+    },
+    {
+      id: "b",
+      agent_id: "test",
+      title: "Bravo",
+      updated_at: "2026-09-04T12:00:00Z",
+      messages: [
+        {
+          id: "v",
+          role: "user",
+          visible_content: "A message containing the секретный маяк phrase",
+        },
+      ],
+    },
+  ];
+  const summary = (item) => ({
+    id: item.id,
+    agent_id: item.agent_id,
+    title: item.title,
+    created_at: item.updated_at,
+    updated_at: item.updated_at,
+    message_count: item.messages.length,
+  });
+  const searchHit = (item, query) => {
+    const normalized = query.trim().toLocaleLowerCase();
+    const titleStart = item.title.toLocaleLowerCase().indexOf(normalized);
+    if (titleStart >= 0)
+      return {
+        conversation: summary(item),
+        match_type: "title",
+        highlight_ranges: [
+          { start: titleStart, end: titleStart + normalized.length },
+        ],
+      };
+    const message = item.messages.find((entry) =>
+      entry.visible_content.toLocaleLowerCase().includes(normalized),
+    );
+    if (!message) return null;
+    const start = message.visible_content
+      .toLocaleLowerCase()
+      .indexOf(normalized);
+    return {
+      conversation: summary(item),
+      match_type: "message",
+      message_id: message.id,
+      snippet: message.visible_content,
+      highlight_ranges: [{ start, end: start + normalized.length }],
+    };
+  };
+  let callback;
+  let subscription;
+  let clipboardText = "";
+  let clipboardFailure = false;
+  const pendingGets = new Map();
+  const pendingSearches = new Map();
+  const requests = [];
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: {
+      async writeText(value) {
+        if (clipboardFailure) throw new Error("Clipboard denied");
+        clipboardText = value;
+      },
+      async readText() {
+        return clipboardText;
+      },
+    },
+  });
+  document.execCommand = (command) => command === "copy" && !clipboardFailure;
+  window.workspaceHarness = {
+    emit(event) {
+      callback?.({
+        ...event,
+        turn_id: subscription?.turn_id,
+        conversation_id: subscription?.conversation_id,
+      });
+    },
+    clipboardText() {
+      return clipboardText;
+    },
+    failClipboard(value) {
+      clipboardFailure = value;
+    },
+    deferGet(id) {
+      pendingGets.set(id, undefined);
+    },
+    resolveGet(id, conversation) {
+      pendingGets.get(id)?.(conversation);
+      pendingGets.delete(id);
+    },
+    deferSearch(query) {
+      pendingSearches.set(query, undefined);
+    },
+    resolveSearch(query, results) {
+      pendingSearches.get(query)?.({
+        hits: structuredClone(results.map((item) => searchHit(item, query))),
+      });
+      pendingSearches.delete(query);
+    },
+    requests() {
+      return structuredClone(requests);
+    },
+    subscription() {
+      return subscription ? structuredClone(subscription) : null;
+    },
+    replaceHass() {
+      card.hass = { ...card.hass, states: { unrelated: Date.now() } };
+    },
+  };
+  const card = document.querySelector("assist-workspace-card");
+  card.config = { agent_id: "test" };
+  card.hass = {
+    callWS: async (m) => {
+      requests.push(structuredClone(m));
+      if (m.type === "assist_workspace/conversation/list") {
+        return { conversations: structuredClone(conversations.map(summary)) };
+      }
+      if (m.type === "assist_workspace/conversation/search") {
+        const query = m.query.trim().toLocaleLowerCase();
+        if (pendingSearches.has(query))
+          return new Promise((resolve) => pendingSearches.set(query, resolve));
+        return {
+          hits: structuredClone(
+            conversations.map((item) => searchHit(item, query)).filter(Boolean),
+          ),
+        };
+      }
+      if (m.type === "assist_workspace/conversation/get") {
+        if (pendingGets.has(m.conversation_id))
+          return new Promise((resolve) =>
+            pendingGets.set(m.conversation_id, resolve),
+          );
+        return structuredClone(
+          conversations.find((item) => item.id === m.conversation_id),
+        );
+      }
+      if (m.type === "assist_workspace/conversation/create") {
+        const created = {
+          id: `created-${conversations.length}`,
+          agent_id: m.agent_id,
+          title: "New chat",
+          updated_at: new Date().toISOString(),
+          messages: [],
+        };
+        conversations = [created, ...conversations];
+        return structuredClone(created);
+      }
+      if (m.type === "conversation/agent/list")
+        return {
+          agents: [
+            {
+              id: "test",
+              name: "Assist agent with an exceptionally long responsive name",
+            },
+          ],
+        };
+      return {};
+    },
+    connection: {
+      subscribeMessage: async (next, message) => {
+        callback = next;
+        subscription = message;
+        return () => {};
+      },
+    },
+  };
+</script>
