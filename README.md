@@ -1,3 +1,8 @@
+> [!WARNING]
+> 
+> Given my low level of interest in the project, it might be better to take a look at
+> [fork from @me217](https://github.com/me217/ha-assist-workspace) instead.
+
 # Assist Workspace
 
 Assist Workspace is a standalone, provider-neutral Home Assistant integration
